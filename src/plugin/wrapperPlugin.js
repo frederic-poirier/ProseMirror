@@ -1,183 +1,165 @@
 import { Plugin, PluginKey, TextSelection } from "prosemirror-state";
-import { keymap } from "prosemirror-keymap";
 
 const pairedCharacters = new Map([
-  ["(", ")"], // Parenthèse
-  ["[", "]"], // Crochet
-  ["{", "}"], // Accolade
-  ["<", ">"], // Chevrons
-  ['"', '"'], // Guillemets doubles
-  ["'", "'"], // Apostrophe
-  ["`", "`"], // Backtick
-  ["«", "»"], // Guillemets français
-  ["“", "”"], // Guillemets typographiques doubles
-  ["‘", "’"], // Guillemets typographiques simples
+  ["(", ")"],
+  ["[", "]"],
+  ["{", "}"],
+  ["<", ">"],
+  ['"', '"'],
+  ["'", "'"],
+  ["`", "`"],
 ]);
 
-const closingCharPluginKey = new PluginKey("closingCharPlugin");
+const closingCharacters = new Map(
+  Array.from(pairedCharacters, ([open, close]) => [close, open])
+);
 
-function isCharBeforeSpaceOrEmpty(state) {
-  const { selection, doc } = state;
-  if (!(selection instanceof TextSelection)) return false;
+const pairedCharPluginKey = new PluginKey("pairedCharPlugin");
 
-  const pos = selection.from;
-  if (pos === 0) return true; // début du doc
-
-  const $pos = doc.resolve(pos);
-  const nodeBefore = $pos.nodeBefore;
-
-  if (!nodeBefore) return true;
-
-  if (nodeBefore.isText) {
-    const lastChar = nodeBefore.text.charAt(nodeBefore.text.length - 1);
-    if (lastChar === " " || pairedCharacters.get(lastChar)) return true;
-  }
-
-  return false;
-}
-
-function wrapWithPair(openChar, state, dispatch) {
-  const closeChar = pairedCharacters.get(openChar);
+function addPair(char, state, dispatch) {
+  const closeChar = pairedCharacters.get(char);
+  if (!isCharBeforeSpaceOrEmpty(state)) return false;
   if (!closeChar) return false;
-
-  const { from, to, empty } = state.selection;
   if (!dispatch) return true;
 
-  const tr = state.tr; // Une seule transaction pour tout
+  const { from, to, empty } = state.selection;
+  const tr = state.tr;
 
-  if (empty) {
-    if (!isCharBeforeSpaceOrEmpty(state)) return false;
+  const selectionText = state.doc.textBetween(from, to, "", "");
+  const newText = empty ? char + closeChar : char + selectionText + closeChar;
 
-    // Insère la paire de caractères
-    tr.insertText(openChar + closeChar, from, to);
-    tr.setSelection(TextSelection.create(tr.doc, from + 1));
+  tr.insertText(newText, from, to);
+  tr.setSelection(
+    empty
+      ? TextSelection.create(tr.doc, from + 1) 
+      : TextSelection.create(tr.doc, from + 1, from + 1 + selectionText.length)
+  );
 
-    // Le caractère de fermeture est maintenant à la position from + 1
-    const closeCharPosition = from + 1;
+  tr.setMeta(pairedCharPluginKey, {
+    start: from,
+    end: from + newText.length,
+    char,
+  });
 
-    // Ajoute cette information au state du plugin
-    const pluginState = closingCharPluginKey.getState(state) || [];
-    const newChar = {
-      start: from,
-      end: closeCharPosition, // Position réelle du caractère de fermeture
-      char: closeChar,
-    };
-    const newState = [...pluginState, newChar];
-
-    // Ajoute les métadonnées à la MÊME transaction
-    tr.setMeta(closingCharPluginKey, newState);
-  } else {
-    const selectedText = state.doc.textBetween(from, to);
-    tr.replaceWith(
-      from,
-      to,
-      state.schema.text(openChar + selectedText + closeChar)
-    );
-
-    // Calcule la position du caractère de fermeture
-    const closeCharPosition = from + 1 + selectedText.length;
-    tr.setSelection(
-      TextSelection.create(tr.doc, from + 1, from + 1 + selectedText.length)
-    );
-
-    const pluginState = closingCharPluginKey.getState(state) || [];
-    const newChar = {
-      start: from,
-      end: closeCharPosition,
-      char: closeChar,
-    };
-    const newState = [...pluginState, newChar];
-    tr.setMeta(closingCharPluginKey, newState);
-  }
-
-  // Dispatch la transaction complète avec toutes les modifications
   dispatch(tr.scrollIntoView());
-
   return true;
 }
 
-// --- 5️⃣ Skip du closing char ---
-function skipClosingChar(typedChar, state, dispatch) {
-  const selPos = state.selection.from;
-  const nextChar = state.doc.textBetween(selPos, selPos + 1);
-  const pluginState = closingCharPluginKey.getState(state) || [];
+function skipPairing(char, state, dispatch, pluginState) {
+  if (!pluginState.length) return false;
 
-  console.log("skip step 1");
+  const { from } = state.selection;
+  const foundPair = pluginState.find((p) => {
+    const sameChar = p.char === closingCharacters.get(char);
+    const sameEnd = p.end === from + 1;
+    return sameEnd && sameChar;
+  });
 
-  const match = pluginState.find(
-    (c) => c.end === selPos && c.char === typedChar
-  );
-
-  console.log("skip step 2", nextChar, typedChar, selPos, pluginState);
-  if (nextChar === typedChar && match) {
-    const tr = state.tr.setSelection(
-      TextSelection.create(state.doc, selPos + 1)
-    );
-    console.log("skip step 3");
-
+  if (foundPair) {
+    const tr = state.tr;
+    tr.setSelection(TextSelection.create(tr.doc, from + 1));
     dispatch(tr.scrollIntoView());
     return true;
   }
-
   return false;
 }
 
-// --- 6️⃣ Keymap dynamique ---
-const dynamicKeymap = {};
-for (const open of pairedCharacters.keys()) {
-  dynamicKeymap[open] = (state, dispatch) =>
-    wrapWithPair(open, state, dispatch);
-}
-for (const close of pairedCharacters.values()) {
-  dynamicKeymap[close] = (state, dispatch) =>
-    skipClosingChar(close, state, dispatch);
+function removePairing(state, dispatch, pluginState) {
+  if (!pluginState) return false;
+
+  const { from } = state.selection;
+  const foundPair = pluginState.find((p) => {
+    return p.start === from - 1;
+  });
+
+  if (foundPair && foundPair.start === foundPair.end - 2) {
+    const tr = state.tr;
+    tr.insertText("", foundPair.start, foundPair.end);
+    dispatch(tr.scrollIntoView());
+    return true;
+  }
+  return false;
 }
 
-// --- 7️⃣ Plugin complet ---
 export const pairedCharPlugin = new Plugin({
-  key: closingCharPluginKey,
+  key: pairedCharPluginKey,
   state: {
     init() {
-      return []; // aucun auto-inserted au début
+      return [];
     },
-    apply(tr, autoClosingChars) {
-      // Mise à jour des positions via mapping
+    apply(tr, oldState) {
+      let newState = oldState.map((p) => ({
+        ...p,
+        start: tr.mapping.map(p.start, 1),
+        end: tr.mapping.map(p.end, -1),
+      }));
 
-      console.log(autoClosingChars);
-      const newStateFromMeta = tr.getMeta(closingCharPluginKey);
+      newState = newState.filter((p) => {
+        const startChar = tr.doc.textBetween(p.start,p.start + 1, undefined, "");
+        const endChar = tr.doc.textBetween(p.end - 1, p.end, undefined, "");
+        const stillValid = startChar === p.char && endChar === pairedCharacters.get(p.char);
+        const caretInside = tr.selection.from > p.start && tr.selection.from < p.end;
+        return stillValid && caretInside;
+      });
 
-      if (newStateFromMeta !== undefined) {
-        return newStateFromMeta;
-      }
-
-      const updated = autoClosingChars
-        .map((c) => ({
-          start: tr.mapping.map(c.start),
-          end: tr.mapping.map(c.end),
-          char: c.char,
-        }))
-        // Filtrage des paires supprimées ou dont la sélection est sortie
-        .filter((c) => {
-          console.log(c);
-          const sel = tr.selection.from;
-          const inDoc = tr.doc.textBetween(c.end, c.end + 1) === c.char;
-          const caretInside = sel >= c.start && sel <= c.end;
-
-          console.log(c, sel, inDoc, caretInside);
-
-          return inDoc || caretInside;
-        });
-
-      return updated;
+      const meta = tr.getMeta(pairedCharPluginKey);
+      if (meta) newState.push(meta);
+      return newState;
     },
   },
   props: {
     handleKeyDown(view, event) {
-      const handler = dynamicKeymap[event.key];
-      if (handler) {
-        return handler(view.state, view.dispatch);
+      const char = event.key;
+      const { selection } = view.state;
+      const pluginState = pairedCharPluginKey.getState(view.state);
+
+      if (!(selection instanceof TextSelection)) return false;
+
+      if (pairedCharacters.has(char) && pairedCharacters.get(char) === char) {
+        if (shouldSkipInsteadOfAdd(char, view.state, pluginState)) {
+          return skipPairing(char, view.state, view.dispatch, pluginState);
+        } else {
+          return addPair(char, view.state, view.dispatch);
+        }
       }
-      return false;
+
+      if (pairedCharacters.has(char)) {
+        return addPair(char, view.state, view.dispatch);
+      } else if (closingCharacters.has(char)) {
+        return skipPairing(char, view.state, view.dispatch, pluginState);
+      } else if (event.key === "Backspace") {
+        return removePairing(view.state, view.dispatch, pluginState);
+      } else return false;
     },
   },
 });
+
+function shouldSkipInsteadOfAdd(char, state, pluginState) {
+  const isSymmetric = pairedCharacters.get(char) === char;
+
+  console.log(isSymmetric)
+  if (!isSymmetric) return false;
+
+  const { from } = state.selection;
+  const filtered = pluginState.find((p) => {
+    return p.char === char && from === p.end - 1;
+  });
+
+  if (filtered && from === filtered.end - 1) return true; // Utiliser skipPairing
+  return false; // Utiliser addPair
+}
+
+function isCharBeforeSpaceOrEmpty(state) {
+  const { selection, doc } = state;
+  if (!(selection instanceof TextSelection)) return false;
+  const pos = selection.from;
+  if (pos === 0) return true;
+  const $pos = doc.resolve(pos);
+  const nodeBefore = $pos.nodeBefore;
+  if (!nodeBefore) return true;
+  if (nodeBefore.isText) {
+    const lastChar = nodeBefore.text.charAt(nodeBefore.text.length - 1);
+    if (lastChar === " " || pairedCharacters.get(lastChar)) return true;
+  }
+  return false;
+}

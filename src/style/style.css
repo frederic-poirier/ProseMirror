@@ -148,6 +148,28 @@ main {
 
   &::placeholder {
     color: var(--color-gray-400);
-
   }
+
+  &:focus {
+    outline: none;
+  }
+}
+
+
+.paired-char {
+  color: rgb(248, 255, 173);
+  background-color: rgba(225, 255, 0, 0.1);
+  border: 1px solid rgb(248, 255, 173);
+  padding: 0.1rem;
+}
+
+#change {
+  color: var(--color-gray-400);
+  border-bottom: 1px solid var(--color-gray-200);
+  font-variant-numeric: tabular-nums;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 0.5rem;
 }
